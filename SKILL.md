@@ -13,6 +13,7 @@ description: 通过 Proposer vs Reviewer 对抗式辩论逐层推进，从模糊
 - 每次 codex exec 调用的 prompt 必须是自包含的——sub-agent 没有对话历史，所有上下文必须在 prompt 中给全
 - 最终输出必须是中文
 - 辩论过程中向用户展示进度：每层开始时说明当前层级，每轮结束时简要说明收敛状态
+- Proposer 和 Reviewer 的完整输出必须直接写入 debate-log.md，不使用单独的输出文件或引用
 
 ## 执行流程
 
@@ -23,10 +24,14 @@ description: 通过 Proposer vs Reviewer 对抗式辩论逐层推进，从模糊
 ```bash
 SESSION_ID=$(date +%s)
 WORK_DIR=./prd-debate-${SESSION_ID}
-mkdir -p ${WORK_DIR}
+mkdir -p ${WORK_DIR}/prompts
 ```
 
 将 `SESSION_ID` 和 `WORK_DIR` 记住，后续所有文件读写都基于此目录。
+
+- `${WORK_DIR}/prompts/` — 存放所有 Proposer 和 Reviewer 的 prompt 文件及原始输出
+- `${WORK_DIR}/debate-log.md` — 辩论完整记录（唯一的内容文件）
+- `${WORK_DIR}/final-prd.md` — 最终 PRD
 
 定位模板目录：
 
@@ -88,26 +93,44 @@ echo "TEMPLATE_DIR=${TEMPLATE_DIR}"
 
 1. 读取模板文件 `${TEMPLATE_DIR}/proposer.md`
 2. 将模板中的 `{{VARIABLE}}` 占位符替换为实际值（变量表见下方）
-3. 将替换后的完整 prompt 写入 `${WORK_DIR}/prompt-proposer-L${LAYER}-R${ROUND}.txt`
+3. 将替换后的完整 prompt 写入 `${WORK_DIR}/prompts/proposer-L${LAYER}-R${ROUND}.txt`
 4. 执行：
 
 ```bash
-cat ${WORK_DIR}/prompt-proposer-L${LAYER}-R${ROUND}.txt | codex exec --full-auto --ephemeral --skip-git-repo-check -o ${WORK_DIR}/proposer-L${LAYER}-R${ROUND}.md -
+cat ${WORK_DIR}/prompts/proposer-L${LAYER}-R${ROUND}.txt | codex exec --full-auto --ephemeral --skip-git-repo-check -o ${WORK_DIR}/prompts/out-proposer-L${LAYER}-R${ROUND}.md -
 ```
 
-5. 读取输出文件，追加到 debate-log.md
+5. 读取输出文件 `${WORK_DIR}/prompts/out-proposer-L${LAYER}-R${ROUND}.md`
+6. 将完整输出内容追加到 `${WORK_DIR}/debate-log.md`，格式：
+
+```markdown
+---
+
+## L{n}：{层级名称}
+
+### Proposer L{n}-R{m}
+
+{proposer 完整输出内容，原样粘贴，不要截断或引用}
+```
 
 **b) 调用 Reviewer**
 
 1. 读取模板文件 `${TEMPLATE_DIR}/reviewer.md`
-2. 替换占位符，写入 prompt 文件
+2. 替换占位符，写入 `${WORK_DIR}/prompts/reviewer-L${LAYER}-R${ROUND}.txt`
 3. 执行：
 
 ```bash
-cat ${WORK_DIR}/prompt-reviewer-L${LAYER}-R${ROUND}.txt | codex exec --full-auto --ephemeral --skip-git-repo-check -o ${WORK_DIR}/reviewer-L${LAYER}-R${ROUND}.md -
+cat ${WORK_DIR}/prompts/reviewer-L${LAYER}-R${ROUND}.txt | codex exec --full-auto --ephemeral --skip-git-repo-check -o ${WORK_DIR}/prompts/out-reviewer-L${LAYER}-R${ROUND}.md -
 ```
 
-4. 读取输出文件，追加到 debate-log.md
+4. 读取输出文件 `${WORK_DIR}/prompts/out-reviewer-L${LAYER}-R${ROUND}.md`
+5. 将完整输出内容追加到 `${WORK_DIR}/debate-log.md`，格式：
+
+```markdown
+### Reviewer L{n}-R{m}
+
+{reviewer 完整输出内容，原样粘贴，不要截断或引用}
+```
 
 **c) Host 判断收敛**
 
@@ -115,7 +138,16 @@ cat ${WORK_DIR}/prompt-reviewer-L${LAYER}-R${ROUND}.txt | codex exec --full-auto
 2. **未收敛但有进展** — 存在实质性分歧但双方都在推进 → 将 Reviewer 反馈注入下一轮 Proposer prompt
 3. **已达 3 轮** — 强制收敛，Host 提取最大公约数，标注未解决的分歧点
 
-每层结束时，将共识追加到 debate-log.md（200 字以内），同时在对话中向用户展示。
+每层结束时，将共识追加到 debate-log.md（200 字以内），同时在对话中向用户展示：
+
+```markdown
+### Host L{n} 共识
+
+{共识内容，200 字以内}
+
+#### 未解决分歧（如有）
+{分歧点及双方立场}
+```
 
 ### Step 3: 回溯校验
 
@@ -123,6 +155,8 @@ L4 结束后：
 - 将 L4 的分期策略与 L1 的核心价值主张对照
 - 检查：MVP 是否覆盖了核心痛点？有没有在妥协中丢掉了不能让步的东西？
 - 如果发现断裂，标注出来并给出修正建议
+
+将回溯校验结果追加到 debate-log.md。
 
 ### Step 4: 汇编最终 PRD
 
@@ -160,26 +194,6 @@ L4 结束后：
 
 ## 附录：辩论过程中的关键分歧与决策
 {从辩论中提取的重要分歧点及最终决策理由}
-```
-
-辩论记录格式（debate-log.md 中每层的结构）：
-
-```markdown
----
-
-## L{n}：{层级名称}
-
-### Proposer L{n}-R{m}
-{proposer 输出内容}
-
-### Reviewer L{n}-R{m}
-{reviewer 输出内容}
-
-### Host L{n} 共识
-{共识内容，200 字以内}
-
-#### 未解决分歧（如有）
-{分歧点及双方立场}
 ```
 
 ## 边缘情况与回退
